@@ -16,10 +16,16 @@
 
 package com.example.android.advancedcoroutines
 
+import androidx.annotation.AnyThread
+import androidx.lifecycle.LiveData
+import androidx.lifecycle.liveData
+import androidx.lifecycle.map
+import androidx.lifecycle.switchMap
 import com.example.android.advancedcoroutines.util.CacheOnSuccess
 import com.example.android.advancedcoroutines.utils.ComparablePair
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * Repository module for handling data operations.
@@ -43,17 +49,42 @@ class PlantRepository private constructor(
         }
 
     /**
-     * Fetch a list of [Plant]s from the database.
+     * Fetch a list of [Plant]s from the database and apply a custom sort order to the list.
      * Returns a LiveData-wrapped List of Plants.
      */
-    val plants = plantDao.getPlants()
+    val plants: LiveData<List<Plant>> = liveData<List<Plant>> {
+        // Observe plants from the database (just like a normal LiveData + Room return)
+        val plantsLiveData = plantDao.getPlants()
+
+        // Fetch our custom sort from the network in a main-safe suspending call (cached)
+        val customSortOrder = plantsListSortOrderCache.getOrAwait()
+
+        // Map the LiveData, applying the sort criteria
+        emitSource(plantsLiveData.map { plantList ->
+            plantList.applySort(customSortOrder)
+        })
+    }
 
     /**
-     * Fetch a list of [Plant]s from the database that matches a given [GrowZone].
-     * Returns a LiveData-wrapped List of Plants.
+     * Fetch a list of [Plant]s from the database that matches a given [GrowZone] and apply a
+     * custom sort order to the list. Returns a LiveData-wrapped List of Plants.
+     *
+     * This this similar to [plants], but uses *main-safe* transforms to avoid blocking the main
+     * thread.
      */
     fun getPlantsWithGrowZone(growZone: GrowZone) =
         plantDao.getPlantsWithGrowZoneNumber(growZone.number)
+            // Apply switchMap, which "switches" to a new liveData every time a new value is
+            // received
+            .switchMap { plantList ->
+                // Use the liveData builder to construct a new coroutine-backed LiveData
+                liveData {
+                    val customSortOrder = plantsListSortOrderCache.getOrAwait()
+                    // Emit the sorted list to the LiveData builder, which will be the new value
+                    // sent to getPlantsWithGrowZoneNumber
+                    emit(plantList.applyMainSafeSort(customSortOrder))
+                }
+            }
 
     /**
      * Returns true if we should make a network request.
@@ -98,6 +129,16 @@ class PlantRepository private constructor(
         val plants = plantService.plantsByGrowZone(growZone)
         plantDao.insertAll(plants)
     }
+
+    /**
+     * The same sorting function as [applySort], but as a suspend function that can run on any thread
+     * (main-safe)
+     */
+    @AnyThread
+    suspend fun List<Plant>.applyMainSafeSort(customSortOrder: List<String>) =
+        withContext(defaultDispatcher) {
+            this@applyMainSafeSort.applySort(customSortOrder)
+        }
 
     /**
      * Extension function that sorts the list of Plants in a given custom order.
