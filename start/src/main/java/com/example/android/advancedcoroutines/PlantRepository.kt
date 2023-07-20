@@ -26,6 +26,9 @@ import com.example.android.advancedcoroutines.utils.ComparablePair
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.asFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
@@ -90,6 +93,12 @@ class PlantRepository private constructor(
                 }
             }
 
+
+    /**
+     * Create a flow that calls a single function
+     */
+    private val customSortFlow = plantsListSortOrderCache::getOrAwait.asFlow()
+
     /**
      * This is a version of [plants] (from above), and represent our observable database using
      * [flow], which has a similar interface to sequences in Kotlin. This allows us to do async or
@@ -97,6 +106,24 @@ class PlantRepository private constructor(
      */
     val plantsFlow: Flow<List<Plant>>
         get() = plantDao.getPlantsFlow()
+            // When the result of customSortFlow is available, this will combine it with the latest
+            // value from the flow above.  Thus, as long as both `plants` and `sortOrder`
+            // have an initial value (their flow has emitted at least one value), any change
+            // to either `plants` or `sortOrder` will call `plants.applySort(sortOrder)`.
+            .combine(customSortFlow) { plants, sortOrder ->
+                plants.applySort(sortOrder)
+            }
+            // Flow allows you to switch the dispatcher the previous transforms run on.
+            // Doing so introduces a buffer that the lines above this can write to, which we don't
+            // need for this UI use-case that only cares about the latest value.
+            //
+            // This flowOn is needed to make the [background-thread only] applySort call above
+            // run on a background thread.
+            .flowOn(defaultDispatcher)
+            // We can tell flow to make the buffer "conflated". It removes the buffer from flowOn
+            // and only shares the last value, as our UI discards any intermediate values in the
+            // buffer.
+            .conflate()
 
     /**
      * This is a version of [getPlantsWithGrowZoneNumber] (from above), but using [Flow].
